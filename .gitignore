@@ -1,4 +1,174 @@
+# ============================================================================
+# .gitignore — rs-webserver
+#
+# 三类常见忽略项 / three common categories:
+#   1) Rust / Cargo 构建产物
+#   2) 编辑器与 IDE
+#   3) 操作系统生成的文件
+#
+# 注意：gitignore 不支持「行尾注释」，注释必须独占一行，
+#       否则整行（含注释）会被当成匹配规则。
+# ============================================================================
+
+# linux
 *.swp
 *~
 
-/target
+# ============================================================================
+# 1. Rust / Cargo
+# ============================================================================
+
+# Cargo 编译产物（可随时用 `cargo build` 重新生成）
+/target/
+target/
+
+# 旧版 Cargo 的默认产物目录（历史遗留，保留以防万一）
+/debug/
+/release/
+
+# rustfmt 生成的备份文件
+**/*.rs.bk
+
+# rustc / MSVC 产出的调试信息
+*.pdb
+*.dSYM/
+
+# 链接与中间产物
+*.d
+*.o
+*.a
+*.rlib
+*.rmeta
+
+# 动态库 / 可执行文件（跨平台）
+*.so
+*.so.*
+*.dylib
+*.dll
+*.lib
+*.exe
+*.bin
+
+# 覆盖率 / profiling 数据（cargo-llvm-cov、llvm-profdata 等）
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+*.gcov
+
+# cargo-mutants 变异测试产物
+**/mutants.out*/
+**/mutants.out.old/
+
+# 基准测试（criterion）产物
+/criterion/
+
+# 说明：Cargo.lock
+#   本项目是「可执行程序（binary）」，Cargo.lock 需要提交，故不忽略。
+#   若日后改成库（library），可取消下面一行注释。
+# Cargo.lock
+
+# 本地/私有配置（例如带个人端口或路径的临时配置），不提交
+config.local.yml
+*.local.yml
+
+
+# ============================================================================
+# 2. 编辑器 / IDE
+# ============================================================================
+
+# JetBrains 系列（IntelliJ IDEA / CLion / RustRover / PyCharm）
+.idea/
+*.iml
+*.ipr
+*.iws
+/out/
+
+# VS Code：默认忽略整个 .vscode/，但保留可共享的团队配置
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# Visual Studio / VS for Mac
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.rsuser
+
+# Eclipse / Aptana
+.project
+.classpath
+.settings/
+.metadata/
+
+# 注意：使用 /bin/ 而非 bin/ —— 后者会连带忽略 Rust 约定的 src/bin/（额外二进制）
+/bin/
+
+# Vim / Neovim
+*.swp
+*.swo
+*.swn
+.*.sw?
+Session.vim
+Sessionx.vim
+.tags
+tags
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# Kate / GNOME Builder / 通用编辑器
+.kate-swp
+*.tmp
+*.bak
+*.orig
+*.rej
+*.log
+
+# 各类工具缓存
+.cache/
+*.stackdump
+
+
+# ============================================================================
+# 3. 操作系统生成的文件
+# ============================================================================
+
+# ---- macOS ----
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+.DocumentRevisions-V100
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# ---- Windows ----
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ---- Linux ----
+.directory
+.Trash-*
+.fuse_hidden*
+.nfs*

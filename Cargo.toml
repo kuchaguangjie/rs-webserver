@@ -2,5 +2,8 @@
 name = "rs-webserver"
 version = "0.1.0"
 edition = "2024"
+description = "A minimal static-file HTTP server with a fixed-size thread pool and a bounded task queue (std-only)."
+license = "Apache-2.0"
+authors = ["eric <kuchaguangjie@gmail.com>"]
 
 [dependencies]

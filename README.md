@@ -20,6 +20,7 @@
 ```
 rs-webserver/
 ├── Cargo.toml           # 包定义（无外部依赖）
+├── LICENSE              # Apache License 2.0 全文
 ├── config.yml           # 运行时配置
 ├── Makefile             # 常用命令封装
 ├── README.md            # 简体中文（默认）
@@ -193,4 +194,25 @@ let message = receiver.lock().unwrap().recv(); // 临时守卫在本语句末尾
 
 ## 许可证
 
-随示例代码，可自由使用。
+本项目基于 **[Apache License 2.0](LICENSE)** 授权，完整条文见 [`LICENSE`](LICENSE)。
+
+如需在源码文件头部加上版权声明，可使用 Apache 官方推荐的模板：
+
+```text
+Copyright 2025 eric
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+除非适用法律要求或书面同意，本许可证下分发的软件按“原样”提供，
+不附带任何明示或暗示的担保或条件。
