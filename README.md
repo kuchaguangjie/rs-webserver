@@ -1,5 +1,7 @@
 # rs-webserver
 
+**语言 / Language:** 简体中文 | [English](doc/en/README.md)
+
 一个用 Rust 标准库实现的极简静态文件 HTTP 服务器，带**固定大小线程池 + 有界任务队列**。
 这是 *The Rust Book* 结尾项目（单线程服务器 → 多线程服务器）的整理版本，
 在此基础上补充了**配置文件**、**背压（503）**、**详细注释**、**单元测试** 与 **Makefile**。
@@ -20,7 +22,10 @@ rs-webserver/
 ├── Cargo.toml           # 包定义（无外部依赖）
 ├── config.yml           # 运行时配置
 ├── Makefile             # 常用命令封装
-├── README.md
+├── README.md            # 简体中文（默认）
+├── doc/
+│   └── en/
+│       └── README.md    # 英文文档（English）
 ├── resource/
 │   └── html/            # 静态资源
 │       ├── hello.html   # GET / 返回
