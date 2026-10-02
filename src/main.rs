@@ -1,16 +1,18 @@
-//! `rs-webserver` 可执行入口：一个极简的静态文件 HTTP 服务器。
+//! `rs-webserver` executable entry point: a minimal static-file HTTP server.
 //!
-//! 支持的路由：
-//! - `GET /`         -> 返回资源目录下的 `hello.html`
-//! - `GET /sleep`    -> 先睡眠 5 秒再返回 `hello.html`（用于演示线程池的阻塞行为）
-//! - 其它任何路径     -> 返回资源目录下的 `404.html`
+//! Supported routes:
+//! - `GET /`         -> returns `hello.html` from the resources directory
+//! - `GET /sleep`    -> sleeps 5 seconds, then returns `hello.html` (to demonstrate
+//!   how a blocking request occupies a worker thread)
+//! - any other path  -> returns `404.html` from the resources directory
 //!
-//! 运行方式：`cargo run -- [配置文件路径]`，配置文件路径缺省为 `config.yml`。
-//! 资源目录、监听地址、线程池大小与任务队列容量均由配置文件决定，详见
-//! [`rs_webserver::config`]。
+//! How to run: `cargo run -- [config-file-path]`; the config path defaults to
+//! `config.yml`. The resources directory, bind address, thread-pool size, and task
+//! queue capacity all come from the config file; see [`rs_webserver::config`].
 //!
-//! 当任务队列已满时，新连接会被**背压拒绝**并返回 `503 Service Unavailable`，
-//! 以避免任务无限堆积（见 [`ThreadPool::execute`]）。
+//! When the task queue is full, new connections are **rejected via backpressure** and
+//! receive `503 Service Unavailable`, so tasks can't pile up without bound
+//! (see [`ThreadPool::execute`]).
 
 use std::{
     fs,
@@ -24,25 +26,27 @@ use std::{
 
 use rs_webserver::{Config, ThreadPool};
 
-/// 未显式指定时使用的默认配置文件路径。
+/// Default config-file path used when none is given explicitly.
 const DEFAULT_CONFIG_PATH: &str = "config.yml";
 
-/// `GET /sleep` 的睡眠时长，用于演示“慢请求”占用工作线程的效果。
+/// Sleep duration for `GET /sleep`, used to demonstrate a "slow request" occupying a
+/// worker thread.
 const SLEEP_DURATION: Duration = Duration::from_secs(5);
 
-/// 路由表：把请求映射到磁盘上的静态文件。
+/// Routing table: maps a request to a static file on disk.
 ///
-/// 在启动时一次性算好路径，避免每个连接都重复拼接；用 [`Arc`] 共享给各工作
-/// 线程（每个连接会把 `Arc` 克隆一份移动进任务闭包）。
+/// The paths are computed once at startup to avoid rebuilding them on every
+/// connection; they are shared with the worker threads via [`Arc`] (each connection
+/// clones the `Arc` and moves it into its task closure).
 struct Routes {
-    /// `GET /` 返回的文件。
+    /// File returned for `GET /`.
     hello: PathBuf,
-    /// 未匹配路径返回的文件。
+    /// File returned for any unmatched path.
     not_found: PathBuf,
 }
 
 fn main() {
-    // 1) 读取配置：命令行第一个参数 > `config.yml` > 内置默认值。
+    // 1) Read the config: first CLI argument > `config.yml` > built-in defaults.
     let config_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string());
@@ -50,111 +54,120 @@ fn main() {
     let config = match Config::load(&config_path) {
         Ok(config) => config,
         Err(e) => {
-            // 配置有误时直接退出，比带着错误配置继续运行更安全。
-            eprintln!("加载配置失败（{config_path}）：{e}");
+            // Exit on a bad config: safer than running on with an invalid configuration.
+            eprintln!("failed to load config ({config_path}): {e}");
             std::process::exit(1);
         }
     };
-    println!("生效配置: {config:?}");
+    println!("effective config: {config:?}");
 
-    // 2) 预先解析出两个资源的完整路径。
+    // 2) Resolve the full paths of the two resources up front.
     let routes = Arc::new(Routes {
         hello: config.resources_dir.join("hello.html"),
         not_found: config.resources_dir.join("404.html"),
     });
 
-    // 3) 绑定监听地址。
+    // 3) Bind the listen address.
     let listener = match TcpListener::bind(&config.bind_address) {
         Ok(listener) => listener,
         Err(e) => {
-            eprintln!("无法绑定地址 {}：{e}", config.bind_address);
+            eprintln!("failed to bind address {}: {e}", config.bind_address);
             std::process::exit(1);
         }
     };
     println!(
-        "监听 {}，线程池大小 {}，队列容量 {}，资源目录 {}",
+        "listening on {}, pool size {}, queue capacity {}, resources dir {}",
         config.bind_address,
         config.pool_size,
         config.max_queue_size,
         config.resources_dir.display()
     );
 
-    // 4) 创建固定大小的线程池（工作线程数 + 有界任务队列容量均来自配置）。
+    // 4) Create the fixed-size thread pool (worker count + bounded queue capacity
+    //    both come from the config).
     let pool = ThreadPool::with_queue_capacity(config.pool_size, config.max_queue_size);
 
-    // 5) 主循环：接收连接并提交给线程池处理。
-    //    `incoming()` 会阻塞等待新连接；具体请求处理在线程池中并发进行。
+    // 5) Main loop: accept connections and submit them to the thread pool.
+    //    `incoming()` blocks waiting for new connections; the actual request handling
+    //    runs concurrently inside the thread pool.
     for stream in listener.incoming() {
         let mut stream = match stream {
             Ok(stream) => stream,
-            // 单个连接建立失败不应终止整个服务器，记录后继续接收下一个。
+            // A single failed connection must not terminate the whole server: log and
+            // keep accepting the next one.
             Err(e) => {
-                eprintln!("接收连接失败: {e}");
+                eprintln!("failed to accept connection: {e}");
                 continue;
             }
         };
 
-        // 任务需要拿走 `stream` 的所有权；为了在“队列已满”时还能就地对客户端回
-        // 一个 503，这里先 `try_clone` 出第二份句柄交给任务，原件留作兜底
-        // （二者共享同一个底层 socket，关闭需等两份都 drop）。
+        // The task must take ownership of `stream`; so that we can still reply 503 in
+        // place when the queue is full, `try_clone` a second handle for the task here
+        // and keep the original as a fallback (both share the same underlying socket,
+        // which is closed only once both are dropped).
         let task_stream = match stream.try_clone() {
             Ok(stream) => stream,
             Err(e) => {
-                eprintln!("复制连接句柄失败: {e}");
+                eprintln!("failed to clone connection handle: {e}");
                 continue;
             }
         };
 
-        // 每个连接克隆一份 Arc（仅增加引用计数），移动进任务闭包；
-        // 这样闭包满足 'static，且资源路径无需重复分配。
+        // Each connection clones the Arc (bumping the refcount only) and moves it into
+        // the task closure; this keeps the closure 'static and avoids reallocating the
+        // resource paths.
         let routes = Arc::clone(&routes);
         if let Err(e) = pool.execute(move || {
             handle_connection(task_stream, &routes);
         }) {
-            // 背压：任务队列已满（或池正在关闭）。直接拒绝并返回 503，
-            // 而不是无限制地把任务堆进内存。
-            eprintln!("拒绝请求（{e}），返回 503");
+            // Backpressure: the task queue is full (or the pool is shutting down).
+            // Reject immediately with 503 instead of piling tasks up in memory forever.
+            eprintln!("rejecting request ({e}), replying 503");
             write_response(
                 &mut stream,
                 "HTTP/1.1 503 SERVICE UNAVAILABLE",
                 "text/plain; charset=utf-8",
-                "503 Service Unavailable：服务器繁忙，请稍后重试。\n",
+                "503 Service Unavailable: server busy, please retry later.\n",
             );
         }
     }
 }
 
-/// 处理单个 TCP 连接：解析请求行、选择资源、写回响应。
+/// Handle a single TCP connection: parse the request line, pick a resource, write the
+/// response.
 ///
-/// 这里刻意**不使用 `unwrap`**：任务闭包内部一旦 panic，会杀死当前工作线程，
-/// 使线程池永久少一个线程。因此所有可能失败的 I/O 都走优雅降级路径。
+/// This deliberately **avoids `unwrap`**: a panic inside a task closure would kill the
+/// current worker thread, permanently shrinking the pool by one. So every I/O operation
+/// that may fail takes a graceful-degradation path.
 fn handle_connection(mut stream: TcpStream, routes: &Routes) {
-    // 只读取请求行（第一行）用于路由判断，其余请求头暂时忽略。
+    // Read only the request line (the first line) for routing; the remaining headers
+    // are ignored for now.
     let request_line = {
         let buf_reader = BufReader::new(&stream);
         match buf_reader.lines().next() {
             Some(Ok(line)) => line,
-            // 空请求或读取出错：直接关闭连接，不 panic。
+            // Empty request or read error: just close the connection, no panic.
             _ => return,
         }
     };
 
-    // 根据请求行选择状态行与要返回的文件。
+    // Pick the status line and the file to return based on the request line.
     let (status_line, path) = match request_line.as_str() {
         "GET / HTTP/1.1" => ("HTTP/1.1 200 OK", &routes.hello),
         "GET /sleep HTTP/1.1" => {
-            // 故意变慢的接口：用于观察慢请求如何占用线程池中的线程。
+            // Deliberately slow endpoint: to observe how a slow request occupies a
+            // thread in the pool.
             thread::sleep(SLEEP_DURATION);
             ("HTTP/1.1 200 OK", &routes.hello)
         }
         _ => ("HTTP/1.1 404 NOT FOUND", &routes.not_found),
     };
 
-    // 读取文件内容；失败时回退到 500，而不是 panic。
+    // Read the file contents; fall back to 500 on failure instead of panicking.
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(e) => {
-            eprintln!("读取资源失败（{}）：{e}", path.display());
+            eprintln!("failed to read resource ({}): {e}", path.display());
             write_response(
                 &mut stream,
                 "HTTP/1.1 500 INTERNAL SERVER ERROR",
@@ -173,9 +186,10 @@ fn handle_connection(mut stream: TcpStream, routes: &Routes) {
     );
 }
 
-/// 按 HTTP/1.1 格式写回响应。
+/// Write a response back in HTTP/1.1 format.
 ///
-/// 写入失败（例如客户端提前断开）只会被忽略——此时没有必要 panic。
+/// A failed write (e.g. the client disconnected early) is simply ignored — there is no
+/// reason to panic in that case.
 fn write_response(stream: &mut TcpStream, status_line: &str, content_type: &str, body: &str) {
     let response = format!(
         "{status_line}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n{body}",

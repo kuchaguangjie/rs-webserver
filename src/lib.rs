@@ -1,34 +1,41 @@
-//! `rs-webserver` 的库部分。
+//! The library part of `rs-webserver`.
 //!
-//! 目前对外提供两块能力：
-//! - [`ThreadPool`]：一个固定大小的线程池，用来并发处理连接；
-//! - [`Config`]：从 `config.yml` 读取的运行时配置（见 [`config`] 模块）。
+//! It currently exposes two pieces of functionality:
+//! - [`ThreadPool`]: a fixed-size thread pool for handling connections concurrently;
+//! - [`Config`]: runtime configuration read from `config.yml` (see the [`config`]
+//!   module).
 //!
-//! # 线程池的实现要点
+//! # Thread-pool implementation notes
 //!
-//! 经典做法是“**一条有界队列 + 若干消费者**”（生产者-消费者 / 工作队列模型）：
+//! The classic approach is "**one bounded queue + several consumers**"
+//! (producer–consumer / work-queue model):
 //!
 //! ```text
 //!            execute(job)                    Arc<Mutex<Receiver>>
-//!  生产者(main) ───────────> [ 有界任务队列 ] <─────────────────┐
-//!                            (容量 = queue_capacity)   |  |  |  |
-//!                                                       v  v  v  v
-//!                                                   Worker0 ... WorkerN
+//!  producer (main) ───────────> [ bounded task queue ] <───────────────┐
+//!                               (capacity = queue_capacity)  |  |  |  |
+//!                                                            v  v  v  v
+//!                                                        Worker0 ... WorkerN
 //! ```
 //!
-//! - [`ThreadPool::execute`] 把任务（一个装箱的闭包）**推入**队列；空闲 worker
-//!   会自己**拉取**下一个任务——即“谁有空谁取”，任务与线程之间没有固定绑定；
-//! - 每个 `Worker` 持有同一个接收端的 `Arc<Mutex<Receiver>>`，循环 `recv()` 抢任务；
-//! - 多个 worker 共享一个 `Receiver`，因此必须用 `Mutex` 保证同一时刻只有一个
-//!   worker 在读通道，取到任务后立刻释放锁再去执行——这样锁不会成为串行化瓶颈。
+//! - [`ThreadPool::execute`] **pushes** a task (a boxed closure) onto the queue; idle
+//!   workers **pull** the next task themselves — i.e. "whoever is free first takes it",
+//!   with no fixed binding between tasks and threads;
+//! - Each `Worker` holds the same receiver via `Arc<Mutex<Receiver>>`, looping on
+//!   `recv()` to grab tasks;
+//! - Multiple workers share one `Receiver`, so a `Mutex` is required to guarantee only
+//!   one worker reads the channel at a time; the lock is released right after the task
+//!   is taken and before it runs, so the lock never becomes a serialization bottleneck.
 //!
-//! 队列是**有界**的（`mpsc::sync_channel`，容量见 [`ThreadPool::with_queue_capacity`]）：
-//! 队列满时 [`ThreadPool::execute`] 会立刻返回 [`ThreadPoolError::QueueFull`]，
-//! 由调用方决定如何降级（本项目的 HTTP 层会回一个 `503 Service Unavailable`），
-//! 从而避免任务无限堆积导致内存暴涨。
+//! The queue is **bounded** (`mpsc::sync_channel`, capacity via
+//! [`ThreadPool::with_queue_capacity`]): when it is full, [`ThreadPool::execute`]
+//! immediately returns [`ThreadPoolError::QueueFull`], leaving the caller to decide how
+//! to degrade (this project's HTTP layer replies `503 Service Unavailable`), which
+//! prevents tasks from piling up without bound and blowing up memory.
 //!
-//! 关于“线程池被用满会怎样”“某个线程卡住会不会影响别的线程”等问题，`recv()`
-//! 与有界队列的行为是理解关键，`README.md` 的“工作原理”一节有详细说明。
+//! For questions like "what happens when the pool is exhausted" or "does one stuck
+//! thread affect the others", the behavior of `recv()` and the bounded queue is the key
+//! to understanding; the "How It Works" section of `README.md` explains this in detail.
 
 pub mod config;
 
@@ -40,98 +47,110 @@ use std::{
     thread,
 };
 
-/// 默认的任务队列容量：允许最多这么多任务在队列中排队等待（不含正在执行的任务）。
+/// Default task-queue capacity: how many tasks may wait in the queue (excluding tasks
+/// that are currently running).
 pub const DEFAULT_QUEUE_CAPACITY: usize = 10_000;
 
-/// 提交任务时可能出现的错误。
+/// Errors that may occur when submitting a task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadPoolError {
-    /// 任务队列已满（到达配置的容量上限），任务被拒绝。
+    /// The task queue is full (it reached the configured capacity), so the task was
+    /// rejected.
     ///
-    /// 这是一种**背压**信号：表示生产速度超过了消费速度，调用方应降级处理
-    /// （例如返回 503、稍后重试），而不是继续堆积任务。
+    /// This is a **backpressure** signal: production outpaces consumption, and the
+    /// caller should degrade (e.g. return 503, retry later) rather than keep piling up
+    /// tasks.
     QueueFull,
-    /// 线程池已关闭（发送端被丢弃），无法再提交任务。
+    /// The thread pool is shut down (the sender was dropped), so no more tasks can be
+    /// submitted.
     Shutdown,
 }
 
 impl fmt::Display for ThreadPoolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ThreadPoolError::QueueFull => write!(f, "任务队列已满"),
-            ThreadPoolError::Shutdown => write!(f, "线程池已关闭"),
+            ThreadPoolError::QueueFull => write!(f, "task queue is full"),
+            ThreadPoolError::Shutdown => write!(f, "thread pool is shut down"),
         }
     }
 }
 
 impl std::error::Error for ThreadPoolError {}
 
-/// 一个可以被工作线程执行的**一次性**任务。
+/// A **one-shot** task that a worker thread can run.
 ///
-/// 用 `Box<dyn FnOnce() + Send + 'static>` 把任意闭包装箱成统一类型，
-/// 从而能放进同一个通道（通道要求所有消息类型一致）：
-/// - `FnOnce`：任务只会被执行一次；
-/// - `Send`：任务需要跨线程移动到工作线程；
-/// - `'static`：任务不能借用会提前失效的栈上数据（闭包必须拥有自己的数据）。
+/// `Box<dyn FnOnce() + Send + 'static>` boxes an arbitrary closure into a single type so
+/// it can be placed into the same channel (the channel requires all message types to
+/// match):
+/// - `FnOnce`: the task is executed exactly once;
+/// - `Send`: the task must be moved across threads to a worker;
+/// - `'static`: the task must not borrow stack data that could expire early (the
+///   closure must own its data).
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
-/// 固定大小的线程池。
+/// A fixed-size thread pool.
 ///
-/// 创建时会启动 `size` 个工作线程，之后通过 [`ThreadPool::execute`] 提交任务。
-/// 当 `ThreadPool` 被 drop 时，会关闭任务通道并等待所有工作线程退出。
+/// Creating it spawns `size` worker threads; tasks are then submitted via
+/// [`ThreadPool::execute`]. When the `ThreadPool` is dropped, it closes the task
+/// channel and waits for all worker threads to exit.
 pub struct ThreadPool {
-    /// 所有工作线程。用 `Vec` 持有以便在 `drop` 时逐个 join。
+    /// All worker threads. Held in a `Vec` so they can be joined one by one on `drop`.
     workers: Vec<Worker>,
-    /// 任务发送端。
+    /// The task sender.
     ///
-    /// 用 `Option` 包裹，是为了能在 `drop` 时 `take()` 出来提前丢弃：
-    /// 一旦发送端被丢弃、且没有其它发送端存在，通道就会关闭，
-    /// 各 worker 的 `recv()` 会返回 `Err` 从而退出循环。
+    /// Wrapped in an `Option` so it can be `take()`n out and dropped early on `drop`:
+    /// once the sender is dropped and no other senders exist, the channel closes and
+    /// each worker's `recv()` returns `Err`, exiting its loop.
     ///
-    /// 注意这里是 `SyncSender`（有界队列）而非 `Sender`（无界队列），
-    /// 从而给队列设定了容量上限。
+    /// Note this is a `SyncSender` (bounded queue) rather than a `Sender` (unbounded
+    /// queue), which imposes a capacity limit on the queue.
     sender: Option<mpsc::SyncSender<Job>>,
 }
 
 impl ThreadPool {
-    /// 使用默认队列容量（[`DEFAULT_QUEUE_CAPACITY`]）创建线程池。
+    /// Create a thread pool with the default queue capacity ([`DEFAULT_QUEUE_CAPACITY`]).
     ///
     /// # Panics
     ///
-    /// 当 `size` 为 0 时会 panic——一个没有任何线程的池无法执行任务。
+    /// Panics when `size` is 0 — a pool with no threads cannot run tasks.
     pub fn new(size: usize) -> ThreadPool {
         ThreadPool::with_queue_capacity(size, DEFAULT_QUEUE_CAPACITY)
     }
 
-    /// 创建一个包含 `size` 个线程、任务队列容量为 `queue_capacity` 的线程池。
+    /// Create a thread pool with `size` threads and a task-queue capacity of
+    /// `queue_capacity`.
     ///
-    /// `queue_capacity` 是**队列中最多可排队等待的任务数**（不含正在被线程执行的
-    /// 任务，所以系统最多同时持有 `size + queue_capacity` 个在途任务）。
+    /// `queue_capacity` is the **maximum number of tasks that may wait in the queue**
+    /// (excluding tasks currently running, so the system holds at most
+    /// `size + queue_capacity` in-flight tasks at once).
     ///
     /// # Panics
     ///
-    /// 当 `size` 或 `queue_capacity` 为 0 时会 panic——没有任何线程或队列空间的池
-    /// 都无法工作。正常路径下 [配置](crate::Config) 校验已保证两者都大于 0。
+    /// Panics when `size` or `queue_capacity` is 0 — a pool with no threads or no queue
+    /// space cannot work. On the normal path, validation via the
+    /// [config](crate::Config) already guarantees both are greater than 0.
     pub fn with_queue_capacity(size: usize, queue_capacity: usize) -> ThreadPool {
-        // 前置条件：至少要有 1 个线程，否则任务永远没人执行。
-        assert!(size > 0, "线程池大小必须大于 0");
-        // 前置条件：队列至少要能容纳 1 个任务。
-        assert!(queue_capacity > 0, "任务队列容量必须大于 0");
+        // Precondition: at least 1 thread, or tasks would never be executed.
+        assert!(size > 0, "pool size must be greater than 0");
+        // Precondition: the queue must hold at least 1 task.
+        assert!(queue_capacity > 0, "queue capacity must be greater than 0");
 
-        // 创建**有界**通道：send 在队列满时会失败/阻塞，形成背压。
-        // 多个 execute 调用 = 多生产者；所有 worker 共享唯一接收端 = 单消费者。
+        // Create a **bounded** channel: `send` fails/blocks when the queue is full,
+        // providing backpressure. Multiple `execute` calls = multiple producers; all
+        // workers share the single receiver = single consumer.
         let (sender, receiver) = mpsc::sync_channel(queue_capacity);
 
-        // Receiver 不能被 clone，因此用 Arc 让多个 worker 共享同一个接收端；
-        // 又因为 recv() 需要 &mut self 且同一时刻只能一个 worker 消费，
-        // 所以再套一层 Mutex 提供内部可变性。
+        // `Receiver` isn't `Clone`, so use an `Arc` to let multiple workers share the
+        // same receiver; and since `recv()` needs `&mut self` and only one worker may
+        // consume at a time, wrap it in a `Mutex` for interior mutability.
         let receiver = Arc::new(Mutex::new(receiver));
 
-        // 预先分配容量，避免边 push 边扩容。
+        // Pre-allocate the capacity to avoid reallocating as we push.
         let mut workers = Vec::with_capacity(size);
 
         for id in 0..size {
-            // Arc::clone 只是增加引用计数，并不会克隆底层 Receiver。
+            // `Arc::clone` only bumps the refcount; it does not clone the underlying
+            // `Receiver`.
             workers.push(Worker::new(id, Arc::clone(&receiver)));
         }
 
@@ -141,43 +160,46 @@ impl ThreadPool {
         }
     }
 
-    /// 提交一个任务到线程池，由某个空闲工作线程异步执行。
+    /// Submit a task to the pool to be run asynchronously by an idle worker.
     ///
-    /// 返回 `Ok(())` 表示任务已入队（不代表已执行）；返回
-    /// [`ThreadPoolError::QueueFull`] 表示队列已满、任务被拒绝；
-    /// 返回 [`ThreadPoolError::Shutdown`] 表示线程池已关闭。
+    /// Returning `Ok(())` means the task was enqueued (not that it has run); returning
+    /// [`ThreadPoolError::QueueFull`] means the queue was full and the task was
+    /// rejected; returning [`ThreadPoolError::Shutdown`] means the pool is shut down.
     ///
-    /// 这里使用 `try_send`（非阻塞）而不是阻塞式的 `send`：本项目的调用方是
-    /// 单线程的 accept 循环，一旦阻塞就会连带停止接收新连接；返回错误让调用方
-    /// 有机会立刻响应 `503` 并继续服务其它连接。
+    /// This uses the non-blocking `try_send` rather than a blocking `send`: this
+    /// project's caller is a single-threaded accept loop, and blocking there would also
+    /// stop accepting new connections; returning an error lets the caller respond `503`
+    /// immediately and keep serving other connections.
     pub fn execute<F>(&self, f: F) -> Result<(), ThreadPoolError>
     where
         F: FnOnce() + Send + 'static,
     {
-        // 把闭包装箱成统一的 Job 类型。
+        // Box the closure into the uniform `Job` type.
         let job = Box::new(f);
 
         match self.sender.as_ref() {
             Some(sender) => match sender.try_send(job) {
                 Ok(()) => Ok(()),
-                // 队列已满：拒绝任务，交由调用方做背压处理。
+                // Queue full: reject the task and let the caller handle backpressure.
                 Err(mpsc::TrySendError::Full(_)) => Err(ThreadPoolError::QueueFull),
-                // 接收端已全部消失（线程池正在关闭）。
+                // All receivers are gone (the pool is shutting down).
                 Err(mpsc::TrySendError::Disconnected(_)) => Err(ThreadPoolError::Shutdown),
             },
-            // 发送端已在 drop 中被取出。
+            // The sender was already taken out during `drop`.
             None => Err(ThreadPoolError::Shutdown),
         }
     }
 }
 
-/// `ThreadPool` 被丢弃时，优雅关闭所有工作线程。
+/// Gracefully shut down all worker threads when the `ThreadPool` is dropped.
 impl Drop for ThreadPool {
     fn drop(&mut self) {
-        // 1) 丢弃发送端，关闭通道。这样还在 recv() 等待的 worker 会收到 Err。
+        // 1) Drop the sender to close the channel, so workers still waiting in `recv()`
+        //    receive `Err`.
         drop(self.sender.take());
 
-        // 2) 逐个 join，等待线程真正结束，确保没有任务/线程被泄漏。
+        // 2) Join each thread to make sure it has actually finished, so no tasks or
+        //    threads leak.
         for worker in &mut self.workers {
             println!("Shutting down worker {}", worker.id);
 
@@ -188,35 +210,41 @@ impl Drop for ThreadPool {
     }
 }
 
-/// 工作线程：持有一个 `JoinHandle`，循环从通道取任务并执行。
+/// A worker thread: holds a `JoinHandle` and loops taking tasks from the channel to run.
 struct Worker {
-    /// 线程编号，仅用于日志。
+    /// Thread id, used only for logging.
     id: usize,
-    /// 线程句柄。用 `Option` 以便在 `drop` 时 `take()`（配合 `join` 需要所有权）。
+    /// The thread handle. Wrapped in an `Option` so it can be `take()`n on `drop`
+    /// (`join` needs ownership).
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Worker {
-    /// 创建一个工作线程：它会不断从共享通道接收并执行任务。
+    /// Create a worker thread that continuously receives and runs tasks from the shared
+    /// channel.
     fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
         let thread = thread::spawn(move || {
             loop {
-                // 加锁 -> 阻塞等待任务 -> 取出后**立即释放锁**（临时守卫在本语句
-                // 结束时被 drop）。因此任一时刻只有一个 worker 在读通道，
-                // 而执行任务时并不持有锁，锁不会把并发执行串行化。
+                // Lock -> block waiting for a task -> **release the lock immediately**
+                // after taking one (the temporary guard is dropped at the end of this
+                // statement). So only one worker is reading the channel at any moment,
+                // and the lock is not held while a task runs, so it doesn't serialize
+                // concurrent execution.
                 let message = receiver.lock().unwrap().recv();
 
                 match message {
                     Ok(job) => {
                         println!("Worker {id} got a job; executing.");
 
-                        // 执行任务。注意：如果这个闭包 panic，panic 会沿着
-                        // 当前线程向上传播并终止该线程——线程池会因此**永久
-                        // 少一个 worker**。所以任务内部的 `handle_connection`
-                        // 刻意避免 unwrap 导致的 panic。
+                        // Run the task. Note: if this closure panics, the panic
+                        // propagates up the current thread and terminates it — the pool
+                        // then **permanently loses one worker**. That's why the task's
+                        // `handle_connection` deliberately avoids `unwrap`-induced
+                        // panics.
                         job();
                     }
-                    // 通道关闭（发送端已 drop）或发生错误：退出循环，线程结束。
+                    // The channel is closed (the sender was dropped) or an error
+                    // occurred: exit the loop and end the thread.
                     Err(_) => {
                         println!("Worker {id} disconnected; shutting down.");
                         break;
@@ -250,7 +278,8 @@ mod tests {
             .unwrap();
         }
 
-        // 等待所有任务完成（这里用一个短 sleep 简化，避免引入额外的同步原语）。
+        // Wait for all tasks to finish (a short sleep simplifies this, avoiding an
+        // extra synchronization primitive).
         while counter.load(Ordering::SeqCst) < 16 {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -270,36 +299,39 @@ mod tests {
         let _ = ThreadPool::with_queue_capacity(1, 0);
     }
 
-    /// 队列满时应返回 [`ThreadPoolError::QueueFull`]（背压）。
+    /// When the queue is full, it should return [`ThreadPoolError::QueueFull`]
+    /// (backpressure).
     ///
-    /// 构造：1 个线程 + 队列容量 1。
-    /// 第 1 个任务占住唯一的 worker（阻塞直到被释放），
-    /// 第 2 个任务填满 1 格队列，第 3 个任务就会因队列满被拒绝。
+    /// Setup: 1 thread + queue capacity 1.
+    /// The 1st task occupies the only worker (blocking until released), the 2nd task
+    /// fills the single queue slot, and the 3rd task is then rejected because the queue
+    /// is full.
     #[test]
     fn rejects_jobs_when_queue_full() {
         let pool = ThreadPool::with_queue_capacity(1, 1);
 
-        // 用于确认「worker 已经开始执行第 1 个任务」。
+        // Used to confirm "the worker has started running the 1st task".
         let (started_tx, started_rx) = mpsc::channel::<()>();
-        // 用于在测试结束时释放第 1 个任务，让它归还 worker。
+        // Used to release the 1st task at the end of the test so it returns the worker.
         let (release_tx, release_rx) = mpsc::channel::<()>();
 
         pool.execute(move || {
             let _ = started_tx.send(());
-            let _ = release_rx.recv(); // 阻塞，占住这个 worker
+            let _ = release_rx.recv(); // block, occupying this worker
         })
         .unwrap();
 
-        // 确保 worker 已进入第 1 个任务（此时它不会再取队列里的任务）。
+        // Make sure the worker has entered the 1st task (it will not pick another task
+        // from the queue now).
         started_rx.recv().unwrap();
 
-        // 第 2 个任务：刚好放进容量为 1 的队列 -> Ok。
+        // 2nd task: just fits into the capacity-1 queue -> Ok.
         pool.execute(|| {}).unwrap();
 
-        // 第 3 个任务：队列已满 -> QueueFull。
+        // 3rd task: queue is full -> QueueFull.
         assert_eq!(pool.execute(|| {}), Err(ThreadPoolError::QueueFull));
 
-        // 释放第 1 个任务，避免 Drop 时 join 卡住。
+        // Release the 1st task so `join` doesn't hang on Drop.
         let _ = release_tx.send(());
     }
 }

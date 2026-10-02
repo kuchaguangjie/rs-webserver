@@ -1,26 +1,31 @@
 # ============================================================
-# rs-webserver 配置文件
+# rs-webserver configuration
 # ------------------------------------------------------------
-# 说明：本项目内置一个轻量的 YAML 子集解析器，仅支持
-#       “顶层 key: value” 形式，请勿使用嵌套结构 / 列表。
-#       所有配置项都可以省略，省略时使用下面标注的默认值。
-#       未知的键会在启动时报错，以便尽早发现拼写错误。
+# Note: this project ships a lightweight YAML-subset parser that
+#       supports only "top-level key: value" pairs. Do not use
+#       nested structures / lists.
+#       Every key is optional; omitted keys use the defaults
+#       noted below. Unknown keys cause a startup error, so
+#       typos are caught early.
 # ============================================================
 
-# 线程池中的工作线程数量（正整数，必须 > 0）。
-# 默认值: 4
+# Number of worker threads in the pool (positive integer, must be > 0).
+# Default: 4
 pool_size: 4
 
-# 任务队列容量上限：最多允许多少个任务排队等待（正整数，必须 > 0）。
-# 队列满时新请求会被立即拒绝并返回 503（背压），避免任务无限堆积。
-# 默认值: 10000
+# Task-queue capacity limit: the max number of tasks that may wait in the
+# queue (positive integer, must be > 0). When the queue is full, new
+# requests are rejected immediately with 503 (backpressure), so tasks
+# can't pile up without bound.
+# Default: 10000
 max_queue_size: 10000
 
-# 静态资源（HTML 文件）所在目录，相对于进程的工作目录。
-# 服务器会从中读取 hello.html（GET /）与 404.html（未匹配路径）。
-# 默认值: resource/html
+# Directory containing the static resources (HTML files), relative to the
+# process working directory. The server reads hello.html (GET /) and
+# 404.html (unmatched paths) from it.
+# Default: resource/html
 resources_dir: resource/html
 
-# HTTP 服务的监听地址。
-# 默认值: 127.0.0.1:7878
+# Listen address of the HTTP server.
+# Default: 127.0.0.1:7878
 bind_address: 127.0.0.1:7878

@@ -1,81 +1,88 @@
+**Language / 语言:** English | [简体中文](doc/zh-Hans/README.md) | [繁體中文](doc/zh-Hant/README.md)
+
 # rs-webserver
 
-**语言 / Language:** 简体中文 | [English](doc/en/README.md)
+A minimal static-file HTTP server built with the Rust standard library, featuring a
+**fixed-size thread pool + bounded task queue**. It is a cleaned-up version of the final
+project from *The Rust Book* (single-threaded server → multithreaded server), extended
+with a **config file**, **backpressure (503)**, **detailed comments**, **unit tests**, and
+a **Makefile**.
 
-一个用 Rust 标准库实现的极简静态文件 HTTP 服务器，带**固定大小线程池 + 有界任务队列**。
-这是 *The Rust Book* 结尾项目（单线程服务器 → 多线程服务器）的整理版本，
-在此基础上补充了**配置文件**、**背压（503）**、**详细注释**、**单元测试** 与 **Makefile**。
+## Features
 
-## 特性
+- Standard library only — **zero third-party dependencies**;
+- Producer–consumer / work-queue model: `main` pushes jobs into the queue, and idle
+  workers pull and run them;
+- A **bounded** task queue (`max_queue_size`, default 10000); when it is full the server
+  returns **503** as backpressure, so tasks can't pile up unboundedly and blow up memory;
+- Configure pool size, queue capacity, resource directory, and bind address via `config.yml`;
+- No panics inside worker threads, so a single bad request can't "kill" a thread and
+  permanently shrink the pool.
 
-- 纯标准库，**零第三方依赖**；
-- 生产者-消费者 / 工作队列模型：`main` 把任务推入队列，空闲 worker 自己拉取执行；
-- 任务队列**有界**（`max_queue_size`，默认 10000），队列满时返回 **503** 形成背压，
-  避免任务无限堆积导致内存暴涨；
-- 通过 `config.yml` 配置线程池大小、队列容量、资源目录、监听地址；
-- 工作线程内不 panic，避免单个坏请求“杀死”线程导致池容量下降。
-
-## 目录结构
+## Layout
 
 ```
 rs-webserver/
-├── Cargo.toml           # 包定义（无外部依赖）
-├── LICENSE              # Apache License 2.0 全文
-├── config.yml           # 运行时配置
-├── Makefile             # 常用命令封装
-├── README.md            # 简体中文（默认）
+├── Cargo.toml           # package manifest (no external deps)
+├── LICENSE              # full text of the Apache License 2.0
+├── config.yml           # runtime configuration
+├── Makefile             # handy command wrappers
+├── README.md            # English (default)
 ├── doc/
-│   └── en/
-│       └── README.md    # 英文文档（English）
+│   ├── zh-Hans/
+│   │   └── README.md    # 简体中文 docs
+│   └── zh-Hant/
+│       └── README.md    # 繁體中文 docs
 ├── resource/
-│   └── html/            # 静态资源
-│       ├── hello.html   # GET / 返回
-│       └── 404.html     # 未匹配路径返回
+│   └── html/            # static assets
+│       ├── hello.html   # returned for GET /
+│       └── 404.html     # returned for any unmatched path
 └── src/
-    ├── main.rs          # 二进制入口：监听、路由、背压、回写响应
-    ├── lib.rs           # ThreadPool（有界队列线程池）
-    └── config.rs        # 配置加载（YAML 子集解析器）
+    ├── main.rs          # binary entry: listen, route, backpressure, write response
+    ├── lib.rs           # ThreadPool (bounded-queue thread pool)
+    └── config.rs        # config loading (YAML-subset parser)
 ```
 
-## 构建与运行
+## Build & Run
 
-需要 Rust 1.85+（本项目使用 edition 2024；开发环境为 1.98）。
+Requires Rust 1.85+ (this project uses edition 2024; developed on 1.98).
 
 ```bash
-# 方式一：直接使用 cargo
-cargo run                     # 读取当前目录下的 config.yml
-cargo run -- path/to/conf.yml # 指定配置文件
+# Option 1: plain cargo
+cargo run                     # reads ./config.yml
+cargo run -- path/to/conf.yml # use a specific config file
 
-# 方式二：使用 Makefile
+# Option 2: Makefile
 make run
-make smoke     # 启动后自动对各路由做一次冒烟测试
-make test      # 运行单元测试
-make clippy    # 静态检查
+make smoke     # start the server and smoke-test each route
+make test      # run unit tests
+make clippy    # lints
 ```
 
-浏览器或 curl 访问：
+Open in a browser or use curl:
 
 ```bash
 curl http://127.0.0.1:7878/       # 200 -> hello.html
-curl http://127.0.0.1:7878/sleep  # 5 秒后 200 -> hello.html（用于演示阻塞）
+curl http://127.0.0.1:7878/sleep  # 200 after 5s -> hello.html (demonstrates blocking)
 curl http://127.0.0.1:7878/nope   # 404 -> 404.html
 ```
 
-## 配置（config.yml）
+## Configuration (config.yml)
 
-| 配置项 | 说明 | 默认值 |
+| Key | Description | Default |
 | --- | --- | --- |
-| `pool_size` | 线程池工作线程数（正整数） | `4` |
-| `max_queue_size` | 任务队列容量上限（正整数） | `10000` |
-| `resources_dir` | 静态资源目录 | `resource/html` |
-| `bind_address` | 监听地址 | `127.0.0.1:7878` |
+| `pool_size` | number of worker threads (positive integer) | `4` |
+| `max_queue_size` | max task-queue capacity (positive integer) | `10000` |
+| `resources_dir` | static resource directory | `resource/html` |
+| `bind_address` | listen address | `127.0.0.1:7878` |
 
-- 所有项均可省略，省略时使用默认值；**找不到配置文件时也回落到默认值**。
-- 未知配置项会报错退出，便于发现拼写错误。
-- 解析器只支持扁平的 `key: value`（含注释与行尾注释、带引号的值），
-  详见 `src/config.rs` 顶部文档。
+- Every key is optional; omitted keys fall back to defaults, and a **missing config file
+  also falls back to defaults**.
+- Unknown keys cause a startup error, which helps catch typos.
+- The parser only supports flat `key: value` pairs (comments, trailing comments, and
+  quoted values); see the docs at the top of `src/config.rs`.
 
-示例：
+Example:
 
 ```yaml
 pool_size: 8
@@ -86,117 +93,141 @@ bind_address: 0.0.0.0:8080
 
 ---
 
-## 工作原理
+## How It Works
 
-### 整体模型：生产者-消费者 / 工作队列
+### The big picture: producer–consumer / work queue
 
-本项目**不是**异步模型，而是经典的**线程池 + 共享任务队列**（也叫工作队列 / pull 模型）：
+This project is **not** async; it uses the classic **thread pool + shared task queue**
+(a.k.a. work queue / pull model):
 
 ```
                      execute(job)                Arc<Mutex<Receiver>>
-  生产者(main) ───────────────────> [ 有界任务队列 ] <──────────────────┐
-  (accept 循环)                      (容量=max_queue_size)   ▲   ▲   ▲   ▲
-                                                             │   │   │   │
-                                                          Worker0 ... WorkerN
+  producer (main) ──────────────────> [ bounded task queue ] <───────────────┐
+  (accept loop)                        (capacity = max_queue_size)  ▲  ▲  ▲  ▲
+                                                                   │  │  │  │
+                                                              Worker0 ... WorkerN
 ```
 
-- 它是**进程内、内存中**的单条队列，**不是** broker 式 MQ（没有持久化、跨进程、确认/重投）；
-- 多个 `execute` 调用 = **多生产者**，多个 worker 共享接收端 = **多消费者**，
-  底层用 std 的 *MPSC* 通道 + `Arc<Mutex<Receiver>>` 组合出 MPMC 的效果；
-- 任务与线程之间**没有固定绑定**：谁先空闲，谁就取走下一个任务。
+- It is a single **in-process, in-memory** queue, **not** a broker-style MQ (no
+  persistence, no cross-process, no ack/redelivery);
+- Multiple `execute` calls = **multiple producers**; workers sharing one receiver =
+  **multiple consumers**. Under the hood, std's *MPSC* channel plus
+  `Arc<Mutex<Receiver>>` combine to give MPMC behavior;
+- There is **no fixed binding** between tasks and threads: whoever becomes free first
+  takes the next task.
 
-### 一个连接的处理流程
+### Lifecycle of one connection
 
-1. `main` 在 `listener.incoming()` 上阻塞等待新连接；
-2. 拿到连接后 `try_clone()` 出一份句柄（原件留作「队列满时回 503」的兜底），
-   把句柄和资源路径 `Arc::clone` 一份，构造任务闭包；
-3. 调用 `ThreadPool::execute` 把闭包**推入**队列（`Box<dyn FnOnce()>`）：
-   - 入队成功 → 返回 `Ok(())`；
-   - 队列已满 → 返回 `Err(QueueFull)`，`main` 立刻给客户端回 **503** 并继续服务下一个连接；
-4. 某个空闲 worker 的 `recv()` 拿到任务，执行 `handle_connection`；
-5. `handle_connection` 解析请求行 → 选资源 → 读文件 → 写回响应。
+1. `main` blocks on `listener.incoming()` waiting for a new connection;
+2. On accept it `try_clone()`s a handle (the original stays behind as a fallback for
+   "reply 503 when the queue is full"), `Arc::clone`s the routes, and builds the task
+   closure;
+3. It calls `ThreadPool::execute` to **push** the closure onto the queue
+   (`Box<dyn FnOnce()>`):
+   - enqueued → returns `Ok(())`;
+   - queue full → returns `Err(QueueFull)`; `main` immediately replies **503** to the
+     client and keeps serving the next connection;
+4. An idle worker's `recv()` picks up the task and runs `handle_connection`;
+5. `handle_connection` parses the request line → picks a resource → reads the file →
+   writes the response.
 
-### 为什么是 `Arc<Mutex<Receiver>>`
+### Why `Arc<Mutex<Receiver>>`
 
-- `Receiver` 不能被 `clone`，但要让 N 个 worker 共享同一个接收端，所以 `Arc` 包一层；
-- `recv()` 需要 `&mut self`，而多个 worker 不能同时可变借用，所以 `Mutex` 提供内部可变性。
+- `Receiver` isn't `Clone`, but N workers must share one receiver — hence the `Arc`;
+- `recv()` needs `&mut self` and workers cannot hold mutable borrows at the same time —
+  hence the `Mutex` for interior mutability.
 
-关键细节：锁**只在 `recv()` 期间持有**——
+Key detail: the lock is **held only during `recv()`** —
 
 ```rust
-let message = receiver.lock().unwrap().recv(); // 临时守卫在本语句末尾即释放
-// 之后才执行任务，此时不持锁
+let message = receiver.lock().unwrap().recv(); // the temporary guard is dropped at the end of this statement
+// the task runs afterwards, without holding the lock
 ```
 
-因此同一时刻只有一个 worker 阻塞在 `recv()` 上（不会出现惊群/串行化），
-而多个 worker 可以**并发执行**各自的任务，锁不会成为吞吐瓶颈。
+So at any moment only one worker is blocked in `recv()` (no thundering herd /
+serialization), while multiple workers can **run their tasks concurrently** — the lock is
+not a throughput bottleneck.
 
-### 有界队列与背压
+### Bounded queue & backpressure
 
-队列由 `mpsc::sync_channel(max_queue_size)` 创建（**有界**），提交用非阻塞的 `try_send`：
+The queue is created with `mpsc::sync_channel(max_queue_size)` (**bounded**), and
+submission uses the non-blocking `try_send`:
 
-- 系统**在途任务上限 = `pool_size` + `max_queue_size`**
-  （`pool_size` 个正在执行 + `max_queue_size` 个排队）；
-- 达到上限后新任务被立即拒绝 → HTTP 层返回 `503 Service Unavailable`；
-- 之所以用 `try_send` 而不是阻塞式 `send`：`main` 是单线程 accept 循环，
-  一旦阻塞就会连带停止接收新连接；返回错误则允许它「拒绝这一个、继续服务其它」。
+- **Max in-flight tasks = `pool_size` + `max_queue_size`**
+  (`pool_size` running + `max_queue_size` queued);
+- Once the limit is reached, new tasks are rejected immediately → the HTTP layer returns
+  `503 Service Unavailable`;
+- Why `try_send` instead of a blocking `send`: `main` is a single-threaded accept loop,
+  so blocking there would also stop accepting new connections; returning an error lets it
+  "reject this one, keep serving the rest".
 
-### 优雅关闭
+### Graceful shutdown
 
-`ThreadPool` 被 drop 时：先丢弃发送端 → 队列关闭 → 各 worker 的 `recv()` 返回 `Err`、
-退出循环 → 主线程逐个 `join`，确保线程与任务不泄漏。
+When `ThreadPool` is dropped: it drops the sender first → the queue closes → each
+worker's `recv()` returns `Err` and its loop exits → the main thread `join`s them one by
+one, so no threads or tasks leak.
 
 ---
 
-## 常见问题（设计问答）
+## FAQ (Design Q&A)
 
-### Q1：线程池线程全部被占用时会发生什么？
+### Q1: What happens when all pool threads are busy?
 
-区别在于队列是否有界：
+It depends on whether the queue is bounded:
 
-- **本项目的做法（有界队列）**：任务先排队；当排队数达到 `max_queue_size`
-  且没有空闲线程时，新任务**被立即拒绝**，HTTP 层返回 **503**。
-  系统在途任务数有硬上限（`pool_size + max_queue_size`），内存不会无界增长。
-- 若用**无界队列**（`mpsc::channel()`）：任务永远不会被拒，只会一直堆积，
-  表现为**延迟线性增长 + 内存持续增长**，生产快于消费时最终可能 OOM。
+- **This project (bounded queue)**: tasks queue up first; once the queue reaches
+  `max_queue_size` with no idle thread, new tasks are **rejected immediately** and the
+  HTTP layer returns **503**. The number of in-flight tasks has a hard cap
+  (`pool_size + max_queue_size`), so memory doesn't grow without bound.
+- With an **unbounded queue** (`mpsc::channel()`): tasks are never rejected, they just
+  pile up, showing up as **linearly growing latency + steadily growing memory**, and
+  eventually OOM if producers outrun consumers.
 
-所以「池子用满」不应默默堆积，而应通过**背压**把压力反馈给上游。
+So an exhausted pool shouldn't silently pile up — it should push pressure back upstream
+via **backpressure**.
 
-### Q2：如果第 3 个线程卡住了，会影响第 4 个线程吗？为什么？
+### Q2: If thread #3 gets stuck, does it affect thread #4? Why?
 
-**不会直接影响第 4 个线程本身。** 原因在于 worker 与请求之间**没有固定绑定关系**：
-所有 worker 从同一个共享队列里「抢」任务，任务交给谁是不确定的。
+**It does not directly affect thread #4 itself.** The reason is that there is **no fixed
+binding** between workers and requests: all workers "grab" tasks from the same shared
+queue, and which worker gets which task is nondeterministic.
 
-- 第 3 个 worker 卡住时，第 4 个 worker 仍会正常加锁、`recv()`、执行其它任务，
-  两者之间没有锁依赖（锁只在 `recv()` 期间短暂持有，执行任务时不持锁，
-  所以不会互相阻塞）；
-- 真正的影响是**并发容量减少一个**：可用 worker 从 N 变成 N-1，吞吐下降，
-  队列更容易堆积（进而更容易触发 503）。
+- While worker #3 is stuck, worker #4 still locks, calls `recv()`, and runs other tasks
+  just fine — there is no lock dependency between them (the lock is held only briefly
+  during `recv()`, not while running a task, so they don't block each other);
+- The real effect is that you **lose one unit of concurrency capacity**: available workers
+  drop from N to N-1, throughput falls, and the queue fills up more easily (making 503s
+  more likely).
 
-需要区分的两种后果：
+Two outcomes worth distinguishing:
 
-1. **部分线程卡住**：其它线程照常工作，只是整体吞吐降低；
-2. **所有线程都卡住**：没有任何 worker 有空去 `recv()` 队列里的新任务，
-   于是**哪怕是 `GET /` 这种极快的请求也会被排在慢请求后面**——
-   这就是典型的**队头阻塞（head-of-line blocking）**，表现为整个服务“假死”。
+1. **Some threads stuck**: the others keep working, just with lower overall throughput;
+2. **All threads stuck**: no worker is free to `recv()` new tasks, so **even an ultra-fast
+   `GET /` ends up queued behind the slow requests** — the classic **head-of-line
+   blocking**, which looks like the whole server "hanging".
 
-因此，个别线程卡住不会“连坐”特定线程，但只要卡住的线程足够多（尤其占满全部），
-就会拖垮整个服务。缓解手段：**请求超时**、**隔离**（把慢操作放到独立的池/队列）、
-**有界队列 + 背压**（本项目已具备），或改用**异步 I/O**（tokio 等）。
+So a stuck thread doesn't take a specific other thread down with it, but once enough
+threads are stuck (especially all of them), the whole service suffers. Mitigations:
+**request timeouts**, **isolation** (put slow work in a separate pool/queue), **bounded
+queue + backpressure** (already built in here), or switching to **async I/O** (tokio, etc.).
 
-### 实测数据（本仓库实际跑出来的）
+### Measured results (actually run in this repo)
 
-- **背压**：`pool_size=1, max_queue_size=2`，并发发起 6 个 `/sleep`（各占线程 5s）——
-  容量 = 1 执行 + 2 排队 = 3，结果恰好 **3 个返回 200、3 个返回 503**，随后服务恢复正常。
-- **队头阻塞**：`pool_size=4`，并发发起 4 个 `/sleep` 占满全部线程后，再发一个 `GET /`，
-  这个快请求等了 **4.49s** 才被服务（`time_total≈4.491537s`）——
-  说明线程被慢请求占满后，快请求同样要排队。
+- **Backpressure**: `pool_size=1, max_queue_size=2`, 6 concurrent `/sleep` requests (each
+  occupying a thread for 5s) — capacity = 1 running + 2 queued = 3, and exactly
+  **3 returned 200 and 3 returned 503**, after which the service recovered.
+- **Head-of-line blocking**: with `pool_size=4`, after 4 concurrent `/sleep` requests
+  occupied all threads, a `GET /` sent at that point waited **4.49s** to be served
+  (`time_total≈4.491537s`) — showing that fast requests queue up behind slow ones once all
+  threads are busy.
 
-## 许可证
+## License
 
-本项目基于 **[Apache License 2.0](LICENSE)** 授权，完整条文见 [`LICENSE`](LICENSE)。
+This project is licensed under the **[Apache License 2.0](LICENSE)**; see
+[`LICENSE`](LICENSE) for the full text.
 
-如需在源码文件头部加上版权声明，可使用 Apache 官方推荐的模板：
+If you want to put a notice at the top of a source file, use the template
+recommended by Apache:
 
 ```text
 Copyright 2025 eric
@@ -214,5 +245,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
-除非适用法律要求或书面同意，本许可证下分发的软件按“原样”提供，
-不附带任何明示或暗示的担保或条件。
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied.
